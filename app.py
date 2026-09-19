@@ -32,27 +32,49 @@ def fetch_and_process_data():
 
     # --- Data Processing (Same as before) ---
     
-    # Standardize keys (Note: If ODK nests these in a group, json_normalize might 
-    # output them as 'Group_Name.ENR_BINFO-C_8'. Adjust the string below if needed).
-    enr_df = enr_df.rename(columns={
-        "ENR_BINFO-C_8": "Participant_ID", 
-        "ENR_BINFO-Q1_2": "Site_Code"
-    })
-    out_df = out_df.rename(columns={"OUT-P_ID": "Participant_ID"})
+    # Helper to find a column containing a target string, regardless of ODK group prefix
+def get_col(df, target):
+    match = [c for c in df.columns if target in c]
+    return match[0] if match else None
 
-    site_mapping = {
-        "NC": "NCT DELHI", "JO": "JODHPUR", "GU": "GUWAHATI",
-        "KO": "KOLKATA", "CH": "CHENNAI", "PU": "PUNE"
-    }
-    
-    # Ensure Site_Code exists before mapping to avoid KeyError on empty databases
-    if 'Site_Code' in enr_df.columns:
-        enr_df['City'] = enr_df['Site_Code'].map(site_mapping)
-    else:
-        enr_df['City'] = np.nan
+# Dynamically map Enrolment columns
+enr_map = {
+    get_col(enr_df, 'ENR_BINFO-C_8'): 'Participant_ID',
+    get_col(enr_df, 'ENR_BINFO-Q1_2'): 'Site_Code',
+    get_col(enr_df, 'ENR_FAHA-Q3_5_1'): 'ENR_FAHA-Q3_5_1',
+    get_col(enr_df, 'ENR_FAHA-Q3_6_1'): 'ENR_FAHA-Q3_6_1'
+}
+enr_df = enr_df.rename(columns={k: v for k, v in enr_map.items() if k})
 
-    out_subset = out_df[['Participant_ID', 'OUT-Q1_11_1a', 'OUT-Q1_12_1a', '__system.submitterName', '__system.submissionDate']].copy()
-    out_subset.columns = ['Participant_ID', 'OUT_Height', 'OUT_Weight', 'OUT_Submitter', 'OUT_Date']
+# Map site codes
+site_mapping = {
+    "NC": "NCT DELHI", "JO": "JODHPUR", "GU": "GUWAHATI",
+    "KO": "KOLKATA", "CH": "CHENNAI", "PU": "PUNE"
+}
+if 'Site_Code' in enr_df.columns:
+    enr_df['City'] = enr_df['Site_Code'].map(site_mapping)
+else:
+    enr_df['City'] = np.nan
+
+# Dynamically map Outcome columns
+out_map = {
+    get_col(out_df, 'OUT-P_ID'): 'Participant_ID',
+    get_col(out_df, 'OUT-Q1_11_1a'): 'OUT_Height',
+    get_col(out_df, 'OUT-Q1_12_1a'): 'OUT_Weight',
+    get_col(out_df, 'submitterName'): 'OUT_Submitter',
+    get_col(out_df, 'submissionDate'): 'OUT_Date'
+}
+out_df = out_df.rename(columns={k: v for k, v in out_map.items() if k})
+
+# Safely subset Outcome data
+expected_out_cols = ['Participant_ID', 'OUT_Height', 'OUT_Weight', 'OUT_Submitter', 'OUT_Date']
+available_out_cols = [c for c in expected_out_cols if c in out_df.columns]
+out_subset = out_df[available_out_cols].copy()
+
+# Inject NaN for any column that was completely missing to prevent downstream errors
+for c in expected_out_cols:
+    if c not in out_subset.columns:
+        out_subset[c] = np.nan
 
     merged_df = pd.merge(enr_df, out_subset, on="Participant_ID", how="left")
 
