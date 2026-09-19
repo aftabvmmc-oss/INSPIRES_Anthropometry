@@ -4,7 +4,7 @@ import numpy as np
 import requests
 import io
 
-@st.cache_data(ttl=600)  # Caches data for 10 minutes to prevent server overload
+@st.cache_data(ttl=600)
 def fetch_and_process_data():
     creds = st.secrets["api_credentials"]
     auth = (creds["username"], creds["password"])
@@ -22,61 +22,61 @@ def fetch_and_process_data():
         st.error(f"Failed to fetch data. Server responded with ENR: {enr_resp.status_code}, OUT: {out_resp.status_code}")
         st.stop()
         
-    # Extract JSON values (ODK Central OData returns records inside a 'value' key)
     enr_data = enr_resp.json().get('value', [])
     out_data = out_resp.json().get('value', [])
     
-    # Flatten JSON into DataFrames (handles any nested ODK groups automatically)
     enr_df = pd.json_normalize(enr_data)
     out_df = pd.json_normalize(out_data)
 
-    # --- Data Processing (Same as before) ---
-    
     # Helper to find a column containing a target string, regardless of ODK group prefix
-def get_col(df, target):
-    match = [c for c in df.columns if target in c]
-    return match[0] if match else None
+    def get_col(df, target):
+        match = [c for c in df.columns if target in c]
+        return match[0] if match else None
 
-# Dynamically map Enrolment columns
-enr_map = {
-    get_col(enr_df, 'ENR_BINFO-C_8'): 'Participant_ID',
-    get_col(enr_df, 'ENR_BINFO-Q1_2'): 'Site_Code',
-    get_col(enr_df, 'ENR_FAHA-Q3_5_1'): 'ENR_FAHA-Q3_5_1',
-    get_col(enr_df, 'ENR_FAHA-Q3_6_1'): 'ENR_FAHA-Q3_6_1'
-}
-enr_df = enr_df.rename(columns={k: v for k, v in enr_map.items() if k})
+    # Dynamically map Enrolment columns
+    enr_map = {
+        get_col(enr_df, 'ENR_BINFO-C_8'): 'Participant_ID',
+        get_col(enr_df, 'ENR_BINFO-Q1_2'): 'Site_Code',
+        get_col(enr_df, 'ENR_FAHA-Q3_5_1'): 'ENR_FAHA-Q3_5_1',
+        get_col(enr_df, 'ENR_FAHA-Q3_6_1'): 'ENR_FAHA-Q3_6_1'
+    }
+    enr_df = enr_df.rename(columns={k: v for k, v in enr_map.items() if k})
 
-# Map site codes
-site_mapping = {
-    "NC": "NCT DELHI", "JO": "JODHPUR", "GU": "GUWAHATI",
-    "KO": "KOLKATA", "CH": "CHENNAI", "PU": "PUNE"
-}
-if 'Site_Code' in enr_df.columns:
-    enr_df['City'] = enr_df['Site_Code'].map(site_mapping)
-else:
-    enr_df['City'] = np.nan
+    site_mapping = {
+        "NC": "NCT DELHI", "JO": "JODHPUR", "GU": "GUWAHATI",
+        "KO": "KOLKATA", "CH": "CHENNAI", "PU": "PUNE"
+    }
+    
+    if 'Site_Code' in enr_df.columns:
+        enr_df['City'] = enr_df['Site_Code'].map(site_mapping)
+    else:
+        enr_df['City'] = np.nan
 
-# Dynamically map Outcome columns
-out_map = {
-    get_col(out_df, 'OUT-P_ID'): 'Participant_ID',
-    get_col(out_df, 'OUT-Q1_11_1a'): 'OUT_Height',
-    get_col(out_df, 'OUT-Q1_12_1a'): 'OUT_Weight',
-    get_col(out_df, 'submitterName'): 'OUT_Submitter',
-    get_col(out_df, 'submissionDate'): 'OUT_Date'
-}
-out_df = out_df.rename(columns={k: v for k, v in out_map.items() if k})
+    # Dynamically map Outcome columns
+    out_map = {
+        get_col(out_df, 'OUT-P_ID'): 'Participant_ID',
+        get_col(out_df, 'OUT-Q1_11_1a'): 'OUT_Height',
+        get_col(out_df, 'OUT-Q1_12_1a'): 'OUT_Weight',
+        get_col(out_df, 'submitterName'): 'OUT_Submitter',
+        get_col(out_df, 'submissionDate'): 'OUT_Date'
+    }
+    out_df = out_df.rename(columns={k: v for k, v in out_map.items() if k})
 
-# Safely subset Outcome data
-expected_out_cols = ['Participant_ID', 'OUT_Height', 'OUT_Weight', 'OUT_Submitter', 'OUT_Date']
-available_out_cols = [c for c in expected_out_cols if c in out_df.columns]
-out_subset = out_df[available_out_cols].copy()
+    expected_out_cols = ['Participant_ID', 'OUT_Height', 'OUT_Weight', 'OUT_Submitter', 'OUT_Date']
+    available_out_cols = [c for c in expected_out_cols if c in out_df.columns]
+    out_subset = out_df[available_out_cols].copy()
 
-# Inject NaN for any column that was completely missing to prevent downstream errors
-for c in expected_out_cols:
-    if c not in out_subset.columns:
-        out_subset[c] = np.nan
+    for c in expected_out_cols:
+        if c not in out_subset.columns:
+            out_subset[c] = np.nan
 
     merged_df = pd.merge(enr_df, out_subset, on="Participant_ID", how="left")
+
+    # Fallback to avoid errors if mapping failed entirely
+    if 'ENR_FAHA-Q3_5_1' not in merged_df.columns:
+        merged_df['ENR_FAHA-Q3_5_1'] = np.nan
+    if 'ENR_FAHA-Q3_6_1' not in merged_df.columns:
+        merged_df['ENR_FAHA-Q3_6_1'] = np.nan
 
     merged_df['Final_Height_cm'] = merged_df['ENR_FAHA-Q3_5_1'].fillna(merged_df['OUT_Height'])
     merged_df['Final_Weight_kg'] = merged_df['ENR_FAHA-Q3_6_1'].fillna(merged_df['OUT_Weight'])
