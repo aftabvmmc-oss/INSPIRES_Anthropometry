@@ -1,77 +1,70 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import requests
 import io
 
-# --- 1. Page Configuration ---
-st.set_page_config(page_title="INSPIRES Study: Anthropometry Tracker", layout="wide")
-st.title("INSPIRES Study: Height & Weight Dashboard")
-
-# --- 2. Data Fetching & Processing ---
-@st.cache_data
+@st.cache_data(ttl=600)  # Caches data for 10 minutes to prevent server overload
 def fetch_and_process_data():
-    # Placeholder for actual data fetching logic (e.g., via ODK Central API)
-    # credentials = st.secrets["api_credentials"]
+    creds = st.secrets["api_credentials"]
+    auth = (creds["username"], creds["password"])
     
-    # Mock data loading - Replace these with your actual API GET requests returning DataFrames
-    # enr_df = pd.read_csv("api_endpoint/ENR_2024")
-    # out_df = pd.read_csv("api_endpoint/OUT_2024")
+    # Construct OData API endpoints for ODK Central forms
+    enr_url = f"{creds['base_url']}/forms/ENR_2024.svc/Submissions?$expand=*"
+    out_url = f"{creds['base_url']}/forms/OUT_2024.svc/Submissions?$expand=*"
     
-    # --- MOCK DATA FOR TESTING PURPOSES ---
-    enr_df = pd.DataFrame({
-        "ENR_BINFO-C_8": ["P001", "P002", "P003", "P004"],
-        "ENR_BINFO-Q1_2": ["NC", "JO", "GU", "KO"],
-        "SubmitterName": ["Data_Col_1", "Data_Col_2", "Data_Col_1", "Data_Col_3"],
-        "today": ["2024-01-01", "2024-01-02", "2024-01-03", "2024-01-04"],
-        "ENR_FAHA-Q3_5": [1, 2, 1, 2],
-        "ENR_FAHA-Q3_5_1": [170.0, np.nan, 165.0, np.nan],
-        "ENR_FAHA-Q3_6": [1, 2, 2, 1],
-        "ENR_FAHA-Q3_6_1": [70.0, np.nan, np.nan, 65.0]
-    })
+    # Fetch Data
+    with st.spinner("Fetching data from ODK server..."):
+        enr_resp = requests.get(enr_url, auth=auth)
+        out_resp = requests.get(out_url, auth=auth)
     
-    out_df = pd.DataFrame({
-        "OUT-P_ID": ["P002", "P003", "P004"],
-        "SubmitterName": ["Data_Col_2", "Data_Col_1", "Data_Col_3"],
-        "today": ["2024-02-01", "2024-02-02", "2024-02-03"],
-        "OUT-Q1_11_1a": [180.0, np.nan, 160.0],
-        "OUT-Q1_12_1a": [80.0, 75.0, np.nan]
-    })
-    # --------------------------------------
+    if enr_resp.status_code != 200 or out_resp.status_code != 200:
+        st.error(f"Failed to fetch data. Server responded with ENR: {enr_resp.status_code}, OUT: {out_resp.status_code}")
+        st.stop()
+        
+    # Extract JSON values (ODK Central OData returns records inside a 'value' key)
+    enr_data = enr_resp.json().get('value', [])
+    out_data = out_resp.json().get('value', [])
+    
+    # Flatten JSON into DataFrames (handles any nested ODK groups automatically)
+    enr_df = pd.json_normalize(enr_data)
+    out_df = pd.json_normalize(out_data)
 
-    # Rename keys for standardizing
-    enr_df = enr_df.rename(columns={"ENR_BINFO-C_8": "Participant_ID", "ENR_BINFO-Q1_2": "Site_Code"})
+    # --- Data Processing (Same as before) ---
+    
+    # Standardize keys (Note: If ODK nests these in a group, json_normalize might 
+    # output them as 'Group_Name.ENR_BINFO-C_8'. Adjust the string below if needed).
+    enr_df = enr_df.rename(columns={
+        "ENR_BINFO-C_8": "Participant_ID", 
+        "ENR_BINFO-Q1_2": "Site_Code"
+    })
     out_df = out_df.rename(columns={"OUT-P_ID": "Participant_ID"})
 
-    # Map Site Codes to City Names
     site_mapping = {
-        "NC": "NCT DELHI",
-        "JO": "JODHPUR",
-        "GU": "GUWAHATI",
-        "KO": "KOLKATA",
-        "CH": "CHENNAI",
-        "PU": "PUNE"
+        "NC": "NCT DELHI", "JO": "JODHPUR", "GU": "GUWAHATI",
+        "KO": "KOLKATA", "CH": "CHENNAI", "PU": "PUNE"
     }
-    enr_df['City'] = enr_df['Site_Code'].map(site_mapping)
+    
+    # Ensure Site_Code exists before mapping to avoid KeyError on empty databases
+    if 'Site_Code' in enr_df.columns:
+        enr_df['City'] = enr_df['Site_Code'].map(site_mapping)
+    else:
+        enr_df['City'] = np.nan
 
-    # Prepare Outcome data for merging
-    out_subset = out_df[['Participant_ID', 'OUT-Q1_11_1a', 'OUT-Q1_12_1a', 'SubmitterName', 'today']].copy()
+    out_subset = out_df[['Participant_ID', 'OUT-Q1_11_1a', 'OUT-Q1_12_1a', '__system.submitterName', '__system.submissionDate']].copy()
     out_subset.columns = ['Participant_ID', 'OUT_Height', 'OUT_Weight', 'OUT_Submitter', 'OUT_Date']
 
-    # Merge datasets on Participant ID
     merged_df = pd.merge(enr_df, out_subset, on="Participant_ID", how="left")
 
-    # Resolve Final Height and Weight (Fallback to Outcome form if Enrolment is NaN)
     merged_df['Final_Height_cm'] = merged_df['ENR_FAHA-Q3_5_1'].fillna(merged_df['OUT_Height'])
     merged_df['Final_Weight_kg'] = merged_df['ENR_FAHA-Q3_6_1'].fillna(merged_df['OUT_Weight'])
 
-    # Determine Source of Data for transparency
     merged_df['Height_Source'] = np.where(merged_df['ENR_FAHA-Q3_5_1'].notna(), 'Enrolment', 
                                  np.where(merged_df['OUT_Height'].notna(), 'Outcome', 'Missing'))
     
     merged_df['Weight_Source'] = np.where(merged_df['ENR_FAHA-Q3_6_1'].notna(), 'Enrolment', 
                                  np.where(merged_df['OUT_Weight'].notna(), 'Outcome', 'Missing'))
 
-    # Flag strictly missing records (missing in BOTH forms)
     merged_df['Height_Missing'] = merged_df['Final_Height_cm'].isna()
     merged_df['Weight_Missing'] = merged_df['Final_Weight_kg'].isna()
 
