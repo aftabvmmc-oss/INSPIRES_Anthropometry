@@ -28,12 +28,14 @@ def fetch_and_process_data():
     enr_data = enr_resp.json().get('value', [])
     out_data = out_resp.json().get('value', [])
     
+    # Convert to DataFrame (handles empty lists safely by creating empty DataFrames)
     enr_df = pd.json_normalize(enr_data) if enr_data else pd.DataFrame()
     out_df = pd.json_normalize(out_data) if out_data else pd.DataFrame()
 
     def get_col(df, target):
         if df.empty: return None
-        match = [c for c in df.columns if target in c]
+        # Safely find columns containing the target string (case-insensitive to be safe)
+        match = [c for c in df.columns if target.lower() in c.lower()]
         return match[0] if match else None
 
     enr_map = {
@@ -42,13 +44,16 @@ def fetch_and_process_data():
         get_col(enr_df, 'ENR_FAHA-Q3_5_1'): 'ENR_FAHA-Q3_5_1',
         get_col(enr_df, 'ENR_FAHA-Q3_6_1'): 'ENR_FAHA-Q3_6_1',
         get_col(enr_df, 'submitterName'): 'SubmitterName',
-        get_col(enr_df, 'today'): 'today' 
+        get_col(enr_df, 'submissionDate'): 'today' # Fallback if 'today' is stored as submissionDate
     }
-    enr_df = enr_df.rename(columns={k: v for k, v in enr_map.items() if k})
     
-    # Fallback for 'today' if ODK saved it as submissionDate instead
+    # Remove None keys before renaming
+    enr_map = {k: v for k, v in enr_map.items() if k is not None}
+    enr_df = enr_df.rename(columns=enr_map)
+    
+    # Check for exact 'today' column if mapping missed it
     if 'today' not in enr_df.columns and not enr_df.empty:
-        alt_today = get_col(enr_df, 'submissionDate')
+        alt_today = get_col(enr_df, 'today')
         if alt_today: enr_df = enr_df.rename(columns={alt_today: 'today'})
 
     expected_enr_cols = ['Participant_ID', 'Site_Code', 'ENR_FAHA-Q3_5_1', 'ENR_FAHA-Q3_6_1', 'SubmitterName', 'today']
@@ -56,6 +61,7 @@ def fetch_and_process_data():
         if c not in enr_df.columns:
             enr_df[c] = np.nan
 
+    # Map sites
     site_mapping = {
         "NC": "NCT DELHI", "JO": "JODHPUR", "GU": "GUWAHATI",
         "KO": "KOLKATA", "CH": "CHENNAI", "PU": "PUNE"
@@ -69,7 +75,8 @@ def fetch_and_process_data():
         get_col(out_df, 'submitterName'): 'OUT_Submitter',
         get_col(out_df, 'submissionDate'): 'OUT_Date'
     }
-    out_df = out_df.rename(columns={k: v for k, v in out_map.items() if k})
+    out_map = {k: v for k, v in out_map.items() if k is not None}
+    out_df = out_df.rename(columns=out_map)
 
     expected_out_cols = ['Participant_ID', 'OUT_Height', 'OUT_Weight', 'OUT_Submitter', 'OUT_Date']
     for c in expected_out_cols:
@@ -106,6 +113,7 @@ except Exception as e:
     st.error(f"Error processing data: {e}")
     st.stop()
 
+# Sidebar Filters
 st.sidebar.header("Filters")
 available_cities = df['City'].dropna().unique() if 'City' in df.columns else []
 selected_cities = st.sidebar.multiselect(
@@ -114,6 +122,7 @@ selected_cities = st.sidebar.multiselect(
     default=available_cities
 )
 
+# Apply Filter safely
 filtered_df = df[df['City'].isin(selected_cities)] if not df.empty else pd.DataFrame()
 
 st.subheader("Data Quality: Missing Anthropometry Metrics")
