@@ -37,13 +37,14 @@ def fetch_and_process_data():
         match = [c for c in df.columns if target in c]
         return match[0] if match else None
 
+    # Dynamically map Enrolment columns
     enr_map = {
         get_col(enr_df, 'ENR_BINFO-C_8'): 'Participant_ID',
         get_col(enr_df, 'ENR_BINFO-Q1_2'): 'Site_Code',
         get_col(enr_df, 'ENR_FAHA-Q3_5_1'): 'ENR_FAHA-Q3_5_1',
         get_col(enr_df, 'ENR_FAHA-Q3_6_1'): 'ENR_FAHA-Q3_6_1',
         get_col(enr_df, 'submitterName'): 'SubmitterName',
-        get_col(enr_df, 'today'): 'today' # Look for 'today'
+        get_col(enr_df, 'today'): 'today' 
     }
     enr_df = enr_df.rename(columns={k: v for k, v in enr_map.items() if k})
     
@@ -52,7 +53,7 @@ def fetch_and_process_data():
         alt_today = get_col(enr_df, 'submissionDate')
         if alt_today: enr_df = enr_df.rename(columns={alt_today: 'today'})
 
-    # GUARANTEE columns exist to prevent KeyError during merge or display
+    # GUARANTEE columns exist to prevent KeyError during merge
     expected_enr_cols = ['Participant_ID', 'Site_Code', 'ENR_FAHA-Q3_5_1', 'ENR_FAHA-Q3_6_1', 'SubmitterName', 'today']
     for c in expected_enr_cols:
         if c not in enr_df.columns:
