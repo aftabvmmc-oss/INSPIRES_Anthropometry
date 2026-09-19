@@ -4,6 +4,9 @@ import numpy as np
 import requests
 import io
 
+st.set_page_config(page_title="INSPIRES Study: Anthropometry Tracker", layout="wide")
+st.title("INSPIRES Study: Height & Weight Dashboard")
+
 @st.cache_data(ttl=600)
 def fetch_and_process_data():
     creds = st.secrets["api_credentials"]
@@ -25,34 +28,42 @@ def fetch_and_process_data():
     enr_data = enr_resp.json().get('value', [])
     out_data = out_resp.json().get('value', [])
     
-    enr_df = pd.json_normalize(enr_data)
-    out_df = pd.json_normalize(out_data)
+    # Safe init in case the server returns empty sets
+    enr_df = pd.json_normalize(enr_data) if enr_data else pd.DataFrame()
+    out_df = pd.json_normalize(out_data) if out_data else pd.DataFrame()
 
-    # Helper to find a column containing a target string, regardless of ODK group prefix
     def get_col(df, target):
+        if df.empty: return None
         match = [c for c in df.columns if target in c]
         return match[0] if match else None
 
-    # Dynamically map Enrolment columns
     enr_map = {
         get_col(enr_df, 'ENR_BINFO-C_8'): 'Participant_ID',
         get_col(enr_df, 'ENR_BINFO-Q1_2'): 'Site_Code',
         get_col(enr_df, 'ENR_FAHA-Q3_5_1'): 'ENR_FAHA-Q3_5_1',
-        get_col(enr_df, 'ENR_FAHA-Q3_6_1'): 'ENR_FAHA-Q3_6_1'
+        get_col(enr_df, 'ENR_FAHA-Q3_6_1'): 'ENR_FAHA-Q3_6_1',
+        get_col(enr_df, 'submitterName'): 'SubmitterName',
+        get_col(enr_df, 'today'): 'today' # Look for 'today'
     }
     enr_df = enr_df.rename(columns={k: v for k, v in enr_map.items() if k})
+    
+    # Fallback for 'today' if ODK saved it as submissionDate instead
+    if 'today' not in enr_df.columns and not enr_df.empty:
+        alt_today = get_col(enr_df, 'submissionDate')
+        if alt_today: enr_df = enr_df.rename(columns={alt_today: 'today'})
+
+    # GUARANTEE columns exist to prevent KeyError during merge or display
+    expected_enr_cols = ['Participant_ID', 'Site_Code', 'ENR_FAHA-Q3_5_1', 'ENR_FAHA-Q3_6_1', 'SubmitterName', 'today']
+    for c in expected_enr_cols:
+        if c not in enr_df.columns:
+            enr_df[c] = np.nan
 
     site_mapping = {
         "NC": "NCT DELHI", "JO": "JODHPUR", "GU": "GUWAHATI",
         "KO": "KOLKATA", "CH": "CHENNAI", "PU": "PUNE"
     }
-    
-    if 'Site_Code' in enr_df.columns:
-        enr_df['City'] = enr_df['Site_Code'].map(site_mapping)
-    else:
-        enr_df['City'] = np.nan
+    enr_df['City'] = enr_df['Site_Code'].map(site_mapping)
 
-    # Dynamically map Outcome columns
     out_map = {
         get_col(out_df, 'OUT-P_ID'): 'Participant_ID',
         get_col(out_df, 'OUT-Q1_11_1a'): 'OUT_Height',
@@ -63,20 +74,15 @@ def fetch_and_process_data():
     out_df = out_df.rename(columns={k: v for k, v in out_map.items() if k})
 
     expected_out_cols = ['Participant_ID', 'OUT_Height', 'OUT_Weight', 'OUT_Submitter', 'OUT_Date']
-    available_out_cols = [c for c in expected_out_cols if c in out_df.columns]
-    out_subset = out_df[available_out_cols].copy()
-
+    
+    # Ensure outcome columns exist to prevent subsetting KeyError
     for c in expected_out_cols:
-        if c not in out_subset.columns:
-            out_subset[c] = np.nan
+        if c not in out_df.columns:
+            out_df[c] = np.nan
+            
+    out_subset = out_df[expected_out_cols].copy()
 
     merged_df = pd.merge(enr_df, out_subset, on="Participant_ID", how="left")
-
-    # Fallback to avoid errors if mapping failed entirely
-    if 'ENR_FAHA-Q3_5_1' not in merged_df.columns:
-        merged_df['ENR_FAHA-Q3_5_1'] = np.nan
-    if 'ENR_FAHA-Q3_6_1' not in merged_df.columns:
-        merged_df['ENR_FAHA-Q3_6_1'] = np.nan
 
     merged_df['Final_Height_cm'] = merged_df['ENR_FAHA-Q3_5_1'].fillna(merged_df['OUT_Height'])
     merged_df['Final_Weight_kg'] = merged_df['ENR_FAHA-Q3_6_1'].fillna(merged_df['OUT_Weight'])
@@ -92,34 +98,34 @@ def fetch_and_process_data():
 
     return merged_df
 
-# --- 3. Helper Function for Excel Export ---
 def convert_df_to_excel(df):
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
         df.to_excel(writer, index=False, sheet_name='Anthropometry_Data')
     return output.getvalue()
 
-# --- 4. Main Application UI ---
-df = fetch_and_process_data()
+try:
+    df = fetch_and_process_data()
+except Exception as e:
+    st.error(f"Error processing data: {e}")
+    st.stop()
 
-# Sidebar Filters
 st.sidebar.header("Filters")
+available_cities = df['City'].dropna().unique() if 'City' in df.columns else []
 selected_cities = st.sidebar.multiselect(
     "Select Site (City):",
-    options=df['City'].dropna().unique(),
-    default=df['City'].dropna().unique()
+    options=available_cities,
+    default=available_cities
 )
 
-# Apply Filter
-filtered_df = df[df['City'].isin(selected_cities)]
+filtered_df = df[df['City'].isin(selected_cities)] if not df.empty else pd.DataFrame()
 
 st.subheader("Data Quality: Missing Anthropometry Metrics")
 st.markdown("Displays counts of participants where height or weight is missing in **both** Enrolment and Outcome forms.")
 
-# Dynamic Metric Cards per selected site
 if not selected_cities:
     st.info("Please select at least one site from the sidebar.")
-else:
+elif not filtered_df.empty:
     cols = st.columns(len(selected_cities))
     for idx, city in enumerate(selected_cities):
         city_data = filtered_df[filtered_df['City'] == city]
@@ -129,25 +135,30 @@ else:
         with cols[idx]:
             st.metric(label=f"{city} - Missing Height", value=int(missing_height))
             st.metric(label=f"{city} - Missing Weight", value=int(missing_weight))
+else:
+    st.warning("No data available for the selected filters.")
 
 st.divider()
 
-# Data Table Display
 st.subheader("Extracted Participant Data")
 columns_to_display = [
     'Participant_ID', 'City', 'SubmitterName', 'today', 
     'Final_Height_cm', 'Height_Source', 
     'Final_Weight_kg', 'Weight_Source'
 ]
-st.dataframe(filtered_df[columns_to_display], use_container_width=True)
 
-# Excel Download Button
-st.subheader("Export Data")
-excel_data = convert_df_to_excel(filtered_df)
+# Ensure all display columns exist before rendering to prevent UI crash
+actual_display_cols = [c for c in columns_to_display if c in filtered_df.columns]
 
-st.download_button(
-    label="📥 Download Data as Excel",
-    data=excel_data,
-    file_name="INSPIRES_Height_Weight_Data.xlsx",
-    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-)
+st.dataframe(filtered_df[actual_display_cols], use_container_width=True)
+
+if not filtered_df.empty:
+    st.subheader("Export Data")
+    excel_data = convert_df_to_excel(filtered_df)
+
+    st.download_button(
+        label="📥 Download Data as Excel",
+        data=excel_data,
+        file_name="INSPIRES_Height_Weight_Data.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
