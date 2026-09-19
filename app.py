@@ -28,7 +28,6 @@ def fetch_and_process_data():
     enr_data = enr_resp.json().get('value', [])
     out_data = out_resp.json().get('value', [])
     
-    # Safe init in case the server returns empty sets
     enr_df = pd.json_normalize(enr_data) if enr_data else pd.DataFrame()
     out_df = pd.json_normalize(out_data) if out_data else pd.DataFrame()
 
@@ -37,7 +36,6 @@ def fetch_and_process_data():
         match = [c for c in df.columns if target in c]
         return match[0] if match else None
 
-    # Dynamically map Enrolment columns
     enr_map = {
         get_col(enr_df, 'ENR_BINFO-C_8'): 'Participant_ID',
         get_col(enr_df, 'ENR_BINFO-Q1_2'): 'Site_Code',
@@ -53,7 +51,6 @@ def fetch_and_process_data():
         alt_today = get_col(enr_df, 'submissionDate')
         if alt_today: enr_df = enr_df.rename(columns={alt_today: 'today'})
 
-    # GUARANTEE columns exist to prevent KeyError during merge
     expected_enr_cols = ['Participant_ID', 'Site_Code', 'ENR_FAHA-Q3_5_1', 'ENR_FAHA-Q3_6_1', 'SubmitterName', 'today']
     for c in expected_enr_cols:
         if c not in enr_df.columns:
@@ -75,8 +72,6 @@ def fetch_and_process_data():
     out_df = out_df.rename(columns={k: v for k, v in out_map.items() if k})
 
     expected_out_cols = ['Participant_ID', 'OUT_Height', 'OUT_Weight', 'OUT_Submitter', 'OUT_Date']
-    
-    # Ensure outcome columns exist to prevent subsetting KeyError
     for c in expected_out_cols:
         if c not in out_df.columns:
             out_df[c] = np.nan
