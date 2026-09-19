@@ -4,9 +4,11 @@ import numpy as np
 import requests
 import io
 
+# --- 1. Page Configuration ---
 st.set_page_config(page_title="INSPIRES Study: Anthropometry Tracker", layout="wide")
 st.title("INSPIRES Study: Height & Weight Dashboard")
 
+# --- 2. Data Fetching & Processing ---
 @st.cache_data(ttl=600)
 def fetch_and_process_data():
     creds = st.secrets["api_credentials"]
@@ -28,65 +30,82 @@ def fetch_and_process_data():
     enr_data = enr_resp.json().get('value', [])
     out_data = out_resp.json().get('value', [])
     
-    # Convert to DataFrame (handles empty lists safely by creating empty DataFrames)
+    # Create DataFrames natively
     enr_df = pd.json_normalize(enr_data) if enr_data else pd.DataFrame()
     out_df = pd.json_normalize(out_data) if out_data else pd.DataFrame()
 
-    def get_col(df, target):
-        if df.empty: return None
-        # Safely find columns containing the target string (case-insensitive to be safe)
-        match = [c for c in df.columns if target.lower() in c.lower()]
-        return match[0] if match else None
+    # ---------------------------------------------------------
+    # ROBUST EXTRACTION LOGIC
+    # Always returns a pandas Series of the correct length, 
+    # even if the column is missing, preventing KeyErrors.
+    # ---------------------------------------------------------
+    def extract_col(df, target_str):
+        if df.empty:
+            return pd.Series(dtype=object)
+        matches = [c for c in df.columns if target_str in c]
+        if matches:
+            return df[matches[0]]
+        return pd.Series(np.nan, index=df.index)
 
-    enr_map = {
-        get_col(enr_df, 'ENR_BINFO-C_8'): 'Participant_ID',
-        get_col(enr_df, 'ENR_BINFO-Q1_2'): 'Site_Code',
-        get_col(enr_df, 'ENR_FAHA-Q3_5_1'): 'ENR_FAHA-Q3_5_1',
-        get_col(enr_df, 'ENR_FAHA-Q3_6_1'): 'ENR_FAHA-Q3_6_1',
-        get_col(enr_df, 'submitterName'): 'SubmitterName',
-        get_col(enr_df, 'submissionDate'): 'today' # Fallback if 'today' is stored as submissionDate
-    }
+    # 1. Build Standardized ENR DataFrame
+    std_enr = pd.DataFrame(index=enr_df.index)
+    std_enr['Participant_ID'] = extract_col(enr_df, 'ENR_BINFO-C_8')
+    std_enr['Site_Code'] = extract_col(enr_df, 'ENR_BINFO-Q1_2')
+    std_enr['ENR_FAHA-Q3_5_1'] = extract_col(enr_df, 'ENR_FAHA-Q3_5_1')
+    std_enr['ENR_FAHA-Q3_6_1'] = extract_col(enr_df, 'ENR_FAHA-Q3_6_1')
     
-    # Remove None keys before renaming
-    enr_map = {k: v for k, v in enr_map.items() if k is not None}
-    enr_df = enr_df.rename(columns=enr_map)
+    # Try finding specific 'SubmitterName', fallback to system submitterName
+    sub_enr = extract_col(enr_df, 'SubmitterName')
+    if sub_enr.isna().all():
+        sub_enr = extract_col(enr_df, 'submitterName')
+    std_enr['SubmitterName'] = sub_enr
     
-    # Check for exact 'today' column if mapping missed it
-    if 'today' not in enr_df.columns and not enr_df.empty:
-        alt_today = get_col(enr_df, 'today')
-        if alt_today: enr_df = enr_df.rename(columns={alt_today: 'today'})
+    # Try finding specific 'today', fallback to system submissionDate
+    date_enr = extract_col(enr_df, 'today')
+    if date_enr.isna().all():
+        date_enr = extract_col(enr_df, 'submissionDate')
+    std_enr['today'] = date_enr
 
-    expected_enr_cols = ['Participant_ID', 'Site_Code', 'ENR_FAHA-Q3_5_1', 'ENR_FAHA-Q3_6_1', 'SubmitterName', 'today']
-    for c in expected_enr_cols:
-        if c not in enr_df.columns:
-            enr_df[c] = np.nan
-
-    # Map sites
+    # Map Sites
     site_mapping = {
         "NC": "NCT DELHI", "JO": "JODHPUR", "GU": "GUWAHATI",
         "KO": "KOLKATA", "CH": "CHENNAI", "PU": "PUNE"
     }
-    enr_df['City'] = enr_df['Site_Code'].map(site_mapping)
+    std_enr['City'] = std_enr['Site_Code'].map(site_mapping)
 
-    out_map = {
-        get_col(out_df, 'OUT-P_ID'): 'Participant_ID',
-        get_col(out_df, 'OUT-Q1_11_1a'): 'OUT_Height',
-        get_col(out_df, 'OUT-Q1_12_1a'): 'OUT_Weight',
-        get_col(out_df, 'submitterName'): 'OUT_Submitter',
-        get_col(out_df, 'submissionDate'): 'OUT_Date'
-    }
-    out_map = {k: v for k, v in out_map.items() if k is not None}
-    out_df = out_df.rename(columns=out_map)
+    # 2. Build Standardized OUT DataFrame
+    std_out = pd.DataFrame(index=out_df.index)
+    std_out['Participant_ID'] = extract_col(out_df, 'OUT-P_ID')
+    std_out['OUT_Height'] = extract_col(out_df, 'OUT-Q1_11_1a')
+    std_out['OUT_Weight'] = extract_col(out_df, 'OUT-Q1_12_1a')
+    std_out['OUT_Submitter'] = extract_col(out_df, 'submitterName')
+    std_out['OUT_Date'] = extract_col(out_df, 'submissionDate')
 
-    expected_out_cols = ['Participant_ID', 'OUT_Height', 'OUT_Weight', 'OUT_Submitter', 'OUT_Date']
-    for c in expected_out_cols:
-        if c not in out_df.columns:
-            out_df[c] = np.nan
-            
-    out_subset = out_df[expected_out_cols].copy()
+    # Ensure no entirely blank rows merge
+    std_enr = std_enr.dropna(subset=['Participant_ID'])
+    std_out = std_out.dropna(subset=['Participant_ID'])
 
-    merged_df = pd.merge(enr_df, out_subset, on="Participant_ID", how="left")
+    # 3. Merge and Process DataFrames
+    if std_enr.empty:
+        # Failsafe if forms have 0 records with a valid ID
+        merged_df = std_enr.copy()
+        merged_df['Final_Height_cm'] = np.nan
+        merged_df['Final_Weight_kg'] = np.nan
+        merged_df['Height_Source'] = 'Missing'
+        merged_df['Weight_Source'] = 'Missing'
+        merged_df['Height_Missing'] = True
+        merged_df['Weight_Missing'] = True
+        return merged_df
 
+    merged_df = pd.merge(std_enr, std_out, on="Participant_ID", how="left")
+
+    # Enforce numeric types just in case ODK returned strings
+    merged_df['ENR_FAHA-Q3_5_1'] = pd.to_numeric(merged_df['ENR_FAHA-Q3_5_1'], errors='coerce')
+    merged_df['OUT_Height'] = pd.to_numeric(merged_df['OUT_Height'], errors='coerce')
+    merged_df['ENR_FAHA-Q3_6_1'] = pd.to_numeric(merged_df['ENR_FAHA-Q3_6_1'], errors='coerce')
+    merged_df['OUT_Weight'] = pd.to_numeric(merged_df['OUT_Weight'], errors='coerce')
+
+    # Resolve Final Values
     merged_df['Final_Height_cm'] = merged_df['ENR_FAHA-Q3_5_1'].fillna(merged_df['OUT_Height'])
     merged_df['Final_Weight_kg'] = merged_df['ENR_FAHA-Q3_6_1'].fillna(merged_df['OUT_Weight'])
 
@@ -101,36 +120,43 @@ def fetch_and_process_data():
 
     return merged_df
 
+# --- 3. Helper Function for Excel Export ---
 def convert_df_to_excel(df):
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
         df.to_excel(writer, index=False, sheet_name='Anthropometry_Data')
     return output.getvalue()
 
+# --- 4. Main Application UI ---
 try:
     df = fetch_and_process_data()
 except Exception as e:
-    st.error(f"Error processing data: {e}")
+    st.error(f"An unexpected error occurred during data processing: {e}")
+    st.stop()
+
+if df.empty:
+    st.warning("No submission data found on the ODK Server or data is empty.")
     st.stop()
 
 # Sidebar Filters
 st.sidebar.header("Filters")
-available_cities = df['City'].dropna().unique() if 'City' in df.columns else []
+available_cities = df['City'].dropna().unique()
 selected_cities = st.sidebar.multiselect(
     "Select Site (City):",
     options=available_cities,
     default=available_cities
 )
 
-# Apply Filter safely
-filtered_df = df[df['City'].isin(selected_cities)] if not df.empty else pd.DataFrame()
+# Apply Filter
+filtered_df = df[df['City'].isin(selected_cities)]
 
 st.subheader("Data Quality: Missing Anthropometry Metrics")
 st.markdown("Displays counts of participants where height or weight is missing in **both** Enrolment and Outcome forms.")
 
+# Dynamic Metric Cards per selected site
 if not selected_cities:
     st.info("Please select at least one site from the sidebar.")
-elif not filtered_df.empty:
+else:
     cols = st.columns(len(selected_cities))
     for idx, city in enumerate(selected_cities):
         city_data = filtered_df[filtered_df['City'] == city]
@@ -140,30 +166,25 @@ elif not filtered_df.empty:
         with cols[idx]:
             st.metric(label=f"{city} - Missing Height", value=int(missing_height))
             st.metric(label=f"{city} - Missing Weight", value=int(missing_weight))
-else:
-    st.warning("No data available for the selected filters.")
 
 st.divider()
 
+# Data Table Display
 st.subheader("Extracted Participant Data")
 columns_to_display = [
     'Participant_ID', 'City', 'SubmitterName', 'today', 
     'Final_Height_cm', 'Height_Source', 
     'Final_Weight_kg', 'Weight_Source'
 ]
+st.dataframe(filtered_df[columns_to_display], use_container_width=True)
 
-# Ensure all display columns exist before rendering to prevent UI crash
-actual_display_cols = [c for c in columns_to_display if c in filtered_df.columns]
+# Excel Download Button
+st.subheader("Export Data")
+excel_data = convert_df_to_excel(filtered_df)
 
-st.dataframe(filtered_df[actual_display_cols], use_container_width=True)
-
-if not filtered_df.empty:
-    st.subheader("Export Data")
-    excel_data = convert_df_to_excel(filtered_df)
-
-    st.download_button(
-        label="📥 Download Data as Excel",
-        data=excel_data,
-        file_name="INSPIRES_Height_Weight_Data.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
+st.download_button(
+    label="📥 Download Data as Excel",
+    data=excel_data,
+    file_name="INSPIRES_Height_Weight_Data.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+)
